@@ -1,0 +1,1 @@
+On install, fill in .env that will automatically be created in the folder of execution, also create an application.properties file where you can define the server port by putting "server.port = PORT_NUMBER" in the file.
