@@ -1,9 +1,12 @@
 package nl.vslcatena.lurvel.models
 
+import java.util.*
+
 data class User(
-    val id: String,
+    val id: UUID,
+    val description: String?,
     val name: String,
     val phoneNumber: String?,
     val email: String?,
-    val commissions: List<Commission>
+    val committees: List<Committee>
 )

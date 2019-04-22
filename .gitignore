@@ -3,3 +3,4 @@ out/*
 .idea/*
 .gradle/*
 .env
+src/main/resources/application.properties
