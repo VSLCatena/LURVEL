@@ -3,6 +3,7 @@ package nl.vslcatena.lurvel.connections
 import nl.vslcatena.lurvel.utils.Env
 import nl.vslcatena.lurvel.models.Committee
 import nl.vslcatena.lurvel.models.User
+import nl.vslcatena.lurvel.utils.UIDConverter
 import java.util.*
 import javax.naming.Context
 import javax.naming.NamingEnumeration
@@ -46,32 +47,51 @@ object LdapConnection {
         }
     }
 
+    fun getUserCommitteesByUid(uid: String): List<Committee>? {
+        val context = createServiceLdapContext()
+        try {
+            val controls = SearchControls()
+            controls.searchScope = SearchControls.SUBTREE_SCOPE
+            controls.returningAttributes = arrayOf("memberOf")
+
+            val result = context.search(Env.LDAP_USER_DC, "(objectGUID=$uid)", controls)
+            if (!result.hasMore()) return null
+
+            val attributeMap = result.next().attributes.all.toMap()
+            return committeesFromAttribute(attributeMap["memberOf"] as? List<*>)
+        } finally {
+            context.close()
+        }
+    }
+
     fun getUser(dn: String, withContext: DirContext): User? {
         // Now we retrieve the user data attributes
         val detailedRawResults = withContext
-            .getAttributes(dn, arrayOf("objectGUID", "memberOf", "cn", "mail", "description", "telephoneNumber"))
+            .getAttributes(dn, arrayOf("objectGUID", "memberOf", "cn", "mail", "employeeNumber", "telephoneNumber"))
 
         // Convert it to a map
         val attributeMap = detailedRawResults.all.toMap()
 
         // Then we loop through all their groups and check if any of them is a committees
-        val userCommittees = ArrayList<Committee>()
-        (attributeMap["memberOf"] as? List<*>)?.forEach { committeeString ->
-            val committee = getAllCommittees().find { it.dn == committeeString }
-            if(committee != null) {
-                userCommittees.add(committee)
-            }
-        }
+        val userCommittees = committeesFromAttribute(attributeMap["memberOf"] as? List<*>)
 
         // And at last we create the user
         return User(
-            UUID.nameUUIDFromBytes(attributeMap["objectGUID"] as ByteArray),
-            attributeMap["description"]?.toString(),
+            UIDConverter.bytesToUid(attributeMap["objectGUID"] as ByteArray),
+            attributeMap["employeeNumber"]?.toString(),
             attributeMap["cn"] as String,
             attributeMap["telephoneNumber"] as? String,
             attributeMap["mail"] as? String,
-            userCommittees
+            userCommittees.map { it.id }
         )
+    }
+
+    private fun committeesFromAttribute(listOfCommittees: List<*>?): List<Committee> {
+        // cache all committees so we don't have to grab them over and over again
+        val allCommittees = getAllCommittees()
+
+        // Then for every committee we get in the parameter we check if it exists in the committee list
+        return listOfCommittees?.mapNotNull { allCommittees[it] } ?: emptyList()
     }
 
     fun login(mail: String, password: String): User? {
@@ -114,9 +134,10 @@ object LdapConnection {
         }
     }
 
-    var committeesCache: List<Committee>? = null
-    var lastUpdated: Long = 0
-    private fun getAllCommittees(): List<Committee> {
+    private var committeesCache: Map<String, Committee>? = null
+    private var apiCommitteesCache: Collection<Committee>? = null
+    private var lastUpdated: Long = 0
+    fun getAllCommittees(): Map<String, Committee> {
         // We expect the software to run for days, this means we want to refresh the committees once a day
         if (committeesCache != null && lastUpdated + 24 * 60 * 60 * 1000 > System.currentTimeMillis())
             return committeesCache!!
@@ -124,32 +145,39 @@ object LdapConnection {
         // Here we set up the things we want to grab
         val controls = SearchControls()
         controls.searchScope = SearchControls.SUBTREE_SCOPE
-        controls.returningAttributes = arrayOf("cn", "distinguishedName")
+        controls.returningAttributes = arrayOf("objectGUID", "cn", "distinguishedName")
 
         // We grab all the groups which are a committee
         val context = createServiceLdapContext()
-        val allCommittees = ArrayList<Committee>()
+        val allCommittees = HashMap<String, Committee>()
         try {
             val results = context.search(Env.LDAP_COMMITTEE_DC, "(memberOf=${Env.LDAP_COMMITTEE_DN})", controls)
 
             while (results.hasMore()) {
                 val result = results.nextElement().attributes.all.toMap()
                 // Then we create a new committee with its name and DN
-                allCommittees.add(
+                allCommittees[result["distinguishedName"] as String] =
                     Committee(
-                        result["cn"] as String, // TODO change to SQL ID
-                        result["cn"] as String,
-                        result["distinguishedName"] as String
+                        UIDConverter.bytesToUid(result["objectGUID"] as ByteArray),
+                        result["cn"] as String
                     )
-                )
             }
         } finally {
             context.close()
         }
 
         committeesCache = allCommittees
+        apiCommitteesCache = allCommittees.values
+
+
         lastUpdated = System.currentTimeMillis()
         return allCommittees
+    }
+
+    fun getApiCommittees(): Collection<Committee> {
+        getAllCommittees()
+
+        return apiCommitteesCache!!
     }
 
     fun NamingEnumeration<out Attribute>.toMap(): Map<String, Any> {
