@@ -14,6 +14,9 @@ import javax.naming.directory.SearchControls
 
 
 object LdapConnection {
+    /**
+     * Creates an LDAP Context from the service account
+     */
     private fun createServiceLdapContext(): DirContext {
         // Here we create a context with our service user
         return createLdapContext(
@@ -22,6 +25,13 @@ object LdapConnection {
         )
     }
 
+    /**
+     * Try to create an LDAP Context from a user that is trying to log in
+     *
+     * @param dn            The DistinguishedName of the user
+     * @param password      The password of the user
+     * @return              An LDAP context with the given credentials
+     */
     private fun createLdapContext(dn: String, password: String): DirContext {
         val props = Properties()
         // The class that does the connection (For us that is LDAP)
@@ -38,27 +48,71 @@ object LdapConnection {
         }
     }
 
-    fun getUser(dn: String): User? {
-        val context = createServiceLdapContext()
-        try {
-            return getUser(dn, context)
-        } finally {
-            context.close()
+
+    /**
+     * Recursively get all distinguishedNames of the groups the user is member of.
+     *
+     * @param context               The LDAP Context to search with
+     * @param distinguishedName     The object to get the parents of
+     * @param cache                 The cache list of this object, this is against infinite looping
+     * @return                      A list of distinguishedNames of all the groups
+     */
+    private fun getGroupsRecursively(
+        context: DirContext,
+        distinguishedName: String,
+        cache: MutableList<String>
+    ) {
+        // If our cache already contains this distinguishedName we cancel as we've gone over this already
+        if (cache.contains(distinguishedName)) return
+        // If not we add it to our cache
+        cache.add(distinguishedName)
+
+        // Get the memberOf attribute from this distinguishedName
+        val result = context.getAttributes(distinguishedName, arrayOf("memberOf"))
+        // If the result is empty it doesn't have any parents
+        if (result.size() <= 0) return
+
+        // Grab all parents
+        val allGroups = result.get("memberOf").all
+
+        // Loop over it
+        while (allGroups.hasMore()) {
+            // Get the group, for completion sake we also check if it's a String
+            val group = allGroups.next() as? String ?: continue
+            // And then we continue recursively over this group
+            getGroupsRecursively(context, group, cache)
         }
     }
 
+    /**
+     * Get all
+     */
     fun getUserCommitteesByUid(uid: String): List<Committee>? {
         val context = createServiceLdapContext()
         try {
+            // Create search controls where we only ask of memberOf
             val controls = SearchControls()
             controls.searchScope = SearchControls.SUBTREE_SCOPE
             controls.returningAttributes = arrayOf("memberOf")
 
-            val result = context.search(Env.LDAP_USER_DC, "(objectGUID=$uid)", controls)
+            // Get the user from uid
+            val result = context.search(Env.LDAP_USER_BASE_DN, "(objectGUID=$uid)", controls)
             if (!result.hasMore()) return null
 
             val attributeMap = result.next().attributes.all.toMap()
-            return committeesFromAttribute(attributeMap["memberOf"] as? List<*>)
+            val members = attributeMap["memberOf"] as? List<*> ?: return null
+
+            // Create a cache list that we will fill
+            val cache = ArrayList<String>()
+
+            members
+                .filterIsInstance<String>()
+                .forEach {
+                    getGroupsRecursively(context, it, cache) // recursively go over all members
+                }
+
+            // Return a list of committees from all committees the user is in
+            return committeesFromAttribute(cache)
         } finally {
             context.close()
         }
@@ -73,7 +127,9 @@ object LdapConnection {
         val attributeMap = detailedRawResults.all.toMap()
 
         // Then we loop through all their groups and check if any of them is a committees
-        val userCommittees = committeesFromAttribute(attributeMap["memberOf"] as? List<*>)
+        val userCommittees = getUserCommitteesByUid(
+            UIDConverter.escapedUid(UIDConverter.bytesToUid(attributeMap["objectGUID"] as ByteArray))
+        )
 
         // And at last we create the user
         return User(
@@ -82,7 +138,7 @@ object LdapConnection {
             attributeMap["cn"] as String,
             attributeMap["telephoneNumber"] as? String,
             attributeMap["mail"] as? String,
-            userCommittees.map { it.id }
+            userCommittees?.map { it.id }
         )
     }
 
@@ -94,14 +150,14 @@ object LdapConnection {
         return listOfCommittees?.mapNotNull { allCommittees[it] } ?: emptyList()
     }
 
-    fun login(mail: String, password: String): User? {
+    fun login(username: String, password: String): User? {
         // Here we set up what we want to grab
         val controls = SearchControls()
         controls.searchScope = SearchControls.SUBTREE_SCOPE
         controls.returningAttributes = arrayOf("distinguishedName")
 
         // I don't know if filter injections are a thing...
-        if (!mail.matches(Regex("^[a-zA-Z0-9.@]+$"))) return null
+        if (!username.matches(Regex("^[a-zA-Z0-9_]{1,20}$"))) return null
 
         // We search through the user group where the email is the given email
         val serviceContext = createServiceLdapContext()
@@ -110,7 +166,7 @@ object LdapConnection {
 
         try {
             val rawResults = serviceContext
-                .search(Env.LDAP_USER_DC, "(mail=$mail)", controls)
+                .search(Env.LDAP_USER_BASE_DN, "(sAMAccountName=$username)", controls)
 
             // If we can't find any user with this we return null
             if (!rawResults.hasMore()) return null
@@ -138,8 +194,8 @@ object LdapConnection {
     private var apiCommitteesCache: Collection<Committee>? = null
     private var lastUpdated: Long = 0
     fun getAllCommittees(): Map<String, Committee> {
-        // We expect the software to run for days, this means we want to refresh the committees once a day
-        if (committeesCache != null && lastUpdated + 24 * 60 * 60 * 1000 > System.currentTimeMillis())
+        // Refresh the committees every hour
+        if (committeesCache != null && lastUpdated + 60 * 60 * 1000 > System.currentTimeMillis())
             return committeesCache!!
 
         // Here we set up the things we want to grab
@@ -151,7 +207,7 @@ object LdapConnection {
         val context = createServiceLdapContext()
         val allCommittees = HashMap<String, Committee>()
         try {
-            val results = context.search(Env.LDAP_COMMITTEE_DC, "(memberOf=${Env.LDAP_COMMITTEE_DN})", controls)
+            val results = context.search(Env.LDAP_COMMITTEE_BASE_DN, "(memberOf=${Env.LDAP_COMMITTEE_DN})", controls)
 
             while (results.hasMore()) {
                 val result = results.nextElement().attributes.all.toMap()

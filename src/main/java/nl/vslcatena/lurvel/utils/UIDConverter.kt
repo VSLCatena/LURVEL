@@ -14,6 +14,6 @@ object UIDConverter {
     }
 
     fun escapedUid(uid: String): String {
-        return uid.chunked(2).joinToString("") { "\\${it}" }
+        return uid.chunked(2).joinToString("") { "\\$it" }
     }
 }

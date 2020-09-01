@@ -37,6 +37,13 @@ sourceSets {
     }
 }
 
+jar {
+    manifest {
+        attributes(
+                'Main-Class': 'nl.vslcatena.lurvel.LurvelMainKt'
+        )
+    }
+}
 
 group 'nl.vslcatena'
 version '1.0-SNAPSHOT'
@@ -60,6 +67,7 @@ dependencies {
     testImplementation "org.springframework.boot:spring-boot-starter-test:$spring_boot_version"
     testImplementation group: 'junit', name: 'junit', version: '4.12'
 }
+
 
 compileKotlin {
     kotlinOptions.jvmTarget = "1.8"

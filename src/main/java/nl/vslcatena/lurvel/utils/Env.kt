@@ -6,13 +6,12 @@ object Env {
     var LDAP_DOMAIN: String = ""
     var LDAP_SERVICEACCOUNT_USERNAME: String = ""
     var LDAP_SERVICEACCOUNT_PASSWORD: String = ""
-    var LDAP_USER_DC: String = ""
-    var LDAP_COMMITTEE_DC: String = ""
+    var LDAP_USER_BASE_DN: String = ""
+    var LDAP_COMMITTEE_BASE_DN: String = ""
     var LDAP_COMMITTEE_DN: String = ""
 
-    var MYSQL_DOMAIN: String = ""
-    var MYSQL_USERNAME: String = ""
-    var MYSQL_PASSWORD: String = ""
+    var SERVER_PORT: String = ""
+
 
     init {
         val file = FileUtils.fromExternal(".env")
@@ -22,8 +21,9 @@ object Env {
             file.createNewFile()
             file.writeText(
                 FileUtils.inputFromResources(".env.example")
-                    .bufferedReader()
-                    .readText()
+                    ?.bufferedReader()
+                    ?.readText()
+                    ?: ""
             )
         }
 
